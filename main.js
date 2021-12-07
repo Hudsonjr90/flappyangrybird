@@ -186,7 +186,7 @@ function reset() {
     gameOver = false;
     score = 0;
     credits.renderable = true;
-    scoreText.setText("FLAPPY\nANGRY\nBIRD");
+    scoreText.setText("FLAPPY\nBIRD\nREMAKE");
     instText.setText("CLIQUE PARA VOAR \nE BOA SORTE");
     gameOverText.renderable = false;
     birdie.body.allowGravity = false;
