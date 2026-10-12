@@ -24,6 +24,20 @@ var pipes = new Array();
 
 var replayclickable = false;
 
+// Cached DOM references and a single frame-synchronized game loop.
+var playerElement = document.getElementById("player");
+var flyareaElement = document.getElementById("flyarea");
+var landElement = document.getElementById("land");
+var ceilingElement = document.getElementById("ceiling");
+var playerBoxElement = document.getElementById("playerbox");
+var pipeBoxElement = document.getElementById("pipebox");
+var gameFrameId = null;
+var lastFrameTimestamp = 0;
+var pipeSpawnElapsed = 0;
+var PIPE_SPAWN_INTERVAL = 1400;
+var FRAME_DURATION = 1000 / 60;
+var MAX_FRAME_DELTA = 34;
+
 //sounds
 var volume = 30;
 var soundJump = new buzz.sound("assets/sounds/sfx_wing.wav");
@@ -105,8 +119,16 @@ function showSplash()
    score = 0;
 
    //update the player in preparation for the next game
-   $("#player").css({ y: 0, x: 0 });
-   updatePlayer($("#player"));
+   if (gameFrameId !== null) {
+      cancelAnimationFrame(gameFrameId);
+      gameFrameId = null;
+   }
+   lastFrameTimestamp = 0;
+   pipeSpawnElapsed = 0;
+   playerElement.style.transition = "";
+   playerElement.style.top = "0px";
+   playerElement.style.transform = "translate3d(0, " + position + "px, 0) rotate(0deg)";
+   updatePlayer();
 
    soundSwoosh.stop();
    soundSwoosh.play();
@@ -125,56 +147,43 @@ function showSplash()
 
 function startGame()
 {
-	console.log("startgame");
+   if (currentstate === states.GameScreen) return;
    currentstate = states.GameScreen;
-
-   //fade out the splash
-   $("#splash").stop();
-   $("#splash").transition({ opacity: 0 }, 300, 'ease');
-
-   //update the big score
+   $("#splash").stop().transition({ opacity: 0 }, 300, 'ease');
    setBigScore();
-
-   //debug mode?
-   if(debugmode)
-   {
-      //show the bounding boxes
-      $(".boundingbox").show();
-   }
-
-   //start up our loops
-   var updaterate = 1000.0 / 60.0 ; //60 times a second
-   loopGameloop = setInterval(gameloop, updaterate);
-   loopPipeloop = setInterval(updatePipes, 1400);
-
-   //jump from the start!
+   if (debugmode) $(".boundingbox").show();
+   lastFrameTimestamp = 0;
+   pipeSpawnElapsed = 0;
    playerJump();
+   gameFrameId = requestAnimationFrame(gameloop);
 }
 
-function updatePlayer(player)
+function updatePlayer()
 {
-   //rotation
    rotation = Math.min((velocity / 10) * 90, 90);
-
-   //apply rotation and position
-   $(player).css({ rotate: rotation, top: position });
+   // Transform-only movement avoids a layout recalculation from changing CSS top every frame.
+   playerElement.style.transform = "translate3d(0, " + position + "px, 0) rotate(" + rotation + "deg)";
 }
 
-function gameloop() {
-   var player = $("#player");
+function gameloop(timestamp)
+{
+   if (currentstate !== states.GameScreen) {
+      gameFrameId = null;
+      return;
+   }
+   if (!lastFrameTimestamp) lastFrameTimestamp = timestamp;
+   var deltaMs = Math.min(timestamp - lastFrameTimestamp, MAX_FRAME_DELTA);
+   lastFrameTimestamp = timestamp;
+   var frameScale = deltaMs / FRAME_DURATION;
 
-   //update the player speed/position
-   velocity += gravity;
-   position += velocity;
+   // Scale the original physics to elapsed time for consistent motion across refresh rates.
+   velocity += gravity * frameScale;
+   position += velocity * frameScale;
+   updatePlayer();
 
-   //update the player
-   updatePlayer(player);
-
-   //create the bounding box
-   var box = document.getElementById('player').getBoundingClientRect();
+   var box = playerElement.getBoundingClientRect();
    var origwidth = 34.0;
    var origheight = 24.0;
-
    var boxwidth = origwidth - (Math.sin(Math.abs(rotation) / 90) * 8);
    var boxheight = (origheight + box.height) / 2;
    var boxleft = ((box.width - boxwidth) / 2) + box.left;
@@ -182,77 +191,53 @@ function gameloop() {
    var boxright = boxleft + boxwidth;
    var boxbottom = boxtop + boxheight;
 
-   //if we're in debug mode, draw the bounding box
-   if(debugmode)
-   {
-      var boundingbox = $("#playerbox");
-      boundingbox.css('left', boxleft);
-      boundingbox.css('top', boxtop);
-      boundingbox.css('height', boxheight);
-      boundingbox.css('width', boxwidth);
+   if (debugmode) {
+      playerBoxElement.style.left = boxleft + "px";
+      playerBoxElement.style.top = boxtop + "px";
+      playerBoxElement.style.height = boxheight + "px";
+      playerBoxElement.style.width = boxwidth + "px";
    }
 
-   //did we hit the ground?
-   if(box.bottom >= $("#land").offset().top)
-   {
+   if (box.bottom >= landElement.getBoundingClientRect().top) {
       playerDead();
       return;
    }
+   if (boxtop <= ceilingElement.getBoundingClientRect().bottom) position = 0;
 
-   //have they tried to escape through the ceiling? :o
-   var ceiling = $("#ceiling");
-   if(boxtop <= (ceiling.offset().top + ceiling.height()))
-      position = 0;
-
-   //we can't go any further without a pipe
-   if(pipes[0] == null)
-      return;
-
-   //determine the bounding box of the next pipes inner area
-   var nextpipe = pipes[0];
-   var nextpipeupper = nextpipe.children(".pipe_upper");
-
-   var pipetop = nextpipeupper.offset().top + nextpipeupper.height();
-   var pipeleft = nextpipeupper.offset().left - 2; // for some reason it starts at the inner pipes offset, not the outer pipes.
-   var piperight = pipeleft + pipewidth;
-   var pipebottom = pipetop + pipeheight;
-
-   if(debugmode)
-   {
-      var boundingbox = $("#pipebox");
-      boundingbox.css('left', pipeleft);
-      boundingbox.css('top', pipetop);
-      boundingbox.css('height', pipeheight);
-      boundingbox.css('width', pipewidth);
+   // Use elapsed time rather than a second setInterval for obstacle spawning.
+   pipeSpawnElapsed += deltaMs;
+   if (pipeSpawnElapsed >= PIPE_SPAWN_INTERVAL) {
+      pipeSpawnElapsed -= PIPE_SPAWN_INTERVAL;
+      updatePipes();
    }
 
-   //have we gotten inside the pipe yet?
-   if(boxright > pipeleft)
-   {
-      //we're within the pipe, have we passed between upper and lower pipes?
-      if(boxtop > pipetop && boxbottom < pipebottom)
-      {
-         //yeah! we're within bounds
+   if (pipes.length > 0) {
+      var nextpipe = pipes[0];
+      var nextpipeupper = nextpipe[0].querySelector(".pipe_upper");
+      if (nextpipeupper) {
+         var pipeRect = nextpipeupper.getBoundingClientRect();
+         var pipetop = pipeRect.bottom;
+         var pipeleft = pipeRect.left - 2;
+         var piperight = pipeleft + pipewidth;
+         var pipebottom = pipetop + pipeheight;
 
-      }
-      else
-      {
-         //no! we touched the pipe
-         playerDead();
-         return;
+         if (debugmode) {
+            pipeBoxElement.style.left = pipeleft + "px";
+            pipeBoxElement.style.top = pipetop + "px";
+            pipeBoxElement.style.height = pipeheight + "px";
+            pipeBoxElement.style.width = pipewidth + "px";
+         }
+         if (boxright > pipeleft && !(boxtop > pipetop && boxbottom < pipebottom)) {
+            playerDead();
+            return;
+         }
+         if (boxleft > piperight) {
+            pipes.splice(0, 1);
+            playerScore();
+         }
       }
    }
-
-
-   //have we passed the imminent danger?
-   if(boxleft > piperight)
-   {
-      //yes, remove it
-      pipes.splice(0, 1);
-
-      //and score a point
-      playerScore();
-   }
+   gameFrameId = requestAnimationFrame(gameloop);
 }
 
 //Handle space bar
@@ -268,11 +253,27 @@ $(document).keydown(function(e){
    }
 });
 
-//Handle mouse down OR touch start
-if("ontouchstart" in window)
-   $(document).on("touchstart", screenClick);
-else
-   $(document).on("mousedown", screenClick);
+// Pointer Events unify touch, pen and mouse; prevent browser gestures over the playfield.
+var gameScreenElement = document.getElementById("gamescreen");
+if (gameScreenElement) gameScreenElement.style.touchAction = "none";
+function handleGamePointer(event) {
+   if (event.target && event.target.closest && event.target.closest("#replay, #footer, a, button")) return;
+   if (event.cancelable) event.preventDefault();
+   screenClick();
+}
+if (window.PointerEvent) {
+   document.addEventListener("pointerdown", function(event) {
+      if (gameScreenElement && gameScreenElement.contains(event.target)) handleGamePointer(event);
+   }, { passive: false });
+} else if ("ontouchstart" in window) {
+   document.addEventListener("touchstart", function(event) {
+      if (gameScreenElement && gameScreenElement.contains(event.target)) handleGamePointer(event);
+   }, { passive: false });
+} else {
+   document.addEventListener("mousedown", function(event) {
+      if (gameScreenElement && gameScreenElement.contains(event.target)) handleGamePointer(event);
+   });
+}
 
 function screenClick()
 {
@@ -357,11 +358,13 @@ function playerDead()
    $(".animated").css('animation-play-state', 'paused');
    $(".animated").css('-webkit-animation-play-state', 'paused');
 
-   //drop the bird to the floor
-   var playerbottom = $("#player").position().top + $("#player").width(); //we use width because he'll be rotated 90 deg
-   var floor = flyArea;
-   var movey = Math.max(0, floor - playerbottom);
-   $("#player").transition({ y: movey + 'px', rotate: 90}, 1000, 'easeInOutCubic');
+   // Stop the single animation loop before the death transition.
+   if (gameFrameId !== null) cancelAnimationFrame(gameFrameId);
+   gameFrameId = null;
+   var playerbottom = position + playerElement.offsetWidth;
+   var movey = Math.max(0, flyArea - playerbottom);
+   playerElement.style.transition = "transform 1000ms cubic-bezier(0.65, 0, 0.35, 1)";
+   playerElement.style.transform = "translate3d(0, " + (position + movey) + "px, 0) rotate(90deg)";
 
    //it's time to change states. as of now we're considered ScoreScreen to disable left click/flying
    currentstate = states.ScoreScreen;
@@ -470,11 +473,11 @@ function playerScore()
 
 function updatePipes()
 {
-	console.log("create pipe");
-
-   
-   //Do any pipes need removal?
-   $(".pipe").filter(function() { return $(this).position().left <= 100; }).remove()
+   // Clean up off-screen pipes only when spawning a new one, not every frame.
+   var flyareaLeft = flyareaElement.getBoundingClientRect().left;
+   $(".pipe").filter(function() {
+      return this.getBoundingClientRect().right <= flyareaLeft + 100;
+   }).remove();
 
 
 
@@ -485,7 +488,7 @@ function updatePipes()
    var topheight = Math.floor((Math.random()*constraint) + padding); //add lower padding
    var bottomheight = (flyArea - pipeheight) - topheight;
    var newpipe = $('<div class="pipe animated"><div class="pipe_upper" style="height: ' + topheight + 'px;"></div><div class="pipe_lower" style="height: ' + bottomheight + 'px;"></div></div>');
-   $("#flyarea").append(newpipe);
+   $(flyareaElement).append(newpipe);
    pipes.push(newpipe);
 }
 
@@ -524,14 +527,11 @@ if(muteSound == null){
 
 function soundSet(){
    let checkMute = localStorage.getItem("mutesound");
-   console.log("check:"+checkMute);
    buzz.all().setVolume(30);
    if(checkMute == "false"){
       buzz.all().setVolume(30);
-      console.log("unmuted");
    }else{
       buzz.all().setVolume(0);
-      console.log("muted");
    }
 
 }
@@ -557,7 +557,6 @@ btnHide.addEventListener('click', function(){
 $(window).resize(function(){
  
    var width = $(window).width();
-   console.log(width);
    let value = (width - 328)/2;
    $('.cover').width(value)
   
